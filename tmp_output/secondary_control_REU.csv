@@ -1,0 +1,2 @@
+username,control_group,source_subreddit,selection_reason,post_id,post_type,subreddit,title,body,score,created_utc,url,is_deleted
+u2,secondary_REU,REU,random_sample,p2,comment,REU,,Comment,2,2026-01-02T00:00:00Z,https://example.com/2,False

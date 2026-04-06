@@ -1,0 +1,13 @@
+Reddit Control Group Scraper Run Log
+Generated at: 2026-04-06T10:57:38
+
+Total rows written: 31087
+Duplicate rows removed: 0
+
+Per-group output:
+- primary_studyAbroad: 31087 rows
+  File: /Users/marcusgao/Desktop/Coding Projects/reddit_user_scraper/output/primary_control_studyAbroad.csv
+- secondary_REU: 0 rows
+  File: /Users/marcusgao/Desktop/Coding Projects/reddit_user_scraper/output/secondary_control_REU.csv
+- secondary_college: 0 rows
+  File: /Users/marcusgao/Desktop/Coding Projects/reddit_user_scraper/output/secondary_control_college.csv

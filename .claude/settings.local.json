@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import streamlit; import httpx; import pandas; print\\('all deps ok'\\)\")",
+      "Bash(python3 -c ':*)",
+      "Bash(python3 -m streamlit run app.py --server.headless true)",
+      "Bash(curl -s http://localhost:8501/healthz)",
+      "Bash(kill %1)",
+      "Bash(python3 -c \"import sys; print\\(sys.version_info\\)\")",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//Users/marcusgao/.pyenv/**)",
+      "Bash(pyenv versions:*)",
+      "Bash(python3:*)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//tmp/**)"
+    ]
+  }
+}
