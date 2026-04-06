@@ -1,0 +1,13 @@
+# Output data — never commit scraped research data
+output/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Environment
+.env
+venv/
