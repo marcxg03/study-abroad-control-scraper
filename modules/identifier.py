@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import random
 from datetime import datetime, timezone
 
@@ -83,22 +82,6 @@ def _content_text(item: dict) -> str:
     return " ".join(str(part) for part in parts if part)
 
 
-def _call_arctic_api(api_function, *, fields: list[str], limit_per_request: int, max_results: int, **kwargs) -> list[dict]:
-    """Call an ArcticShift wrapper and apply a local max-results ceiling when needed."""
-    function_signature = inspect.signature(api_function)
-    call_kwargs = {
-        "fields": fields,
-        "limit_per_request": limit_per_request,
-        **kwargs,
-    }
-
-    if "max_results" in function_signature.parameters:
-        call_kwargs["max_results"] = max_results
-
-    records = api_function(**call_kwargs)
-    return list(records[:max_results])
-
-
 def identify_primary_control(keywords=None, target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
     """Identify the primary study abroad control users from posts and comments."""
     keyword_list = keywords or CANCELLATION_KEYWORDS
@@ -110,52 +93,59 @@ def identify_primary_control(keywords=None, target_n=None, progress_callback=Non
 
     user_activity_counts: dict[str, int] = {}
     keyword_matched_users: set[str] = set()
+    scanned_posts = 0
+    scanned_comments = 0
 
-    posts = _call_arctic_api(
-        arctic_api.get_subreddit_posts,
-        subreddit=_PRIMARY_SUBREDDIT,
+    def _count_qualifying() -> int:
+        return sum(
+            1 for u, c in user_activity_counts.items()
+            if u in keyword_matched_users or c == 1
+        )
+
+    for page in arctic_api.get_subreddit_posts_stream(
+        _PRIMARY_SUBREDDIT,
         fields=post_fields,
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
-    )
-    for item in posts:
-        username = item.get("author")
-        if _is_bot(username):
-            continue
-        user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
-        if _keyword_match(_content_text(item), keyword_list):
-            keyword_matched_users.add(username)
+    ):
+        scanned_posts += len(page)
+        for item in page:
+            username = item.get("author")
+            if _is_bot(username):
+                continue
+            user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+            if _keyword_match(_content_text(item), keyword_list):
+                keyword_matched_users.add(username)
 
-    if progress_callback is not None:
-        interim_users = sum(
-            1 for u, c in user_activity_counts.items()
-            if u in keyword_matched_users or c == 1
-        )
-        progress_callback(len(posts), interim_users)
+        currently_found = _count_qualifying()
+        if progress_callback is not None:
+            progress_callback(scanned_posts, currently_found)
+        if currently_found >= requested_n:
+            break
 
-    comments = _call_arctic_api(
-        arctic_api.get_subreddit_comments,
-        subreddit=_PRIMARY_SUBREDDIT,
-        fields=comment_fields,
-        limit_per_request=100,
-        max_results=MAX_SUBREDDIT_SCAN_POSTS,
-    )
-    for item in comments:
-        username = item.get("author")
-        if _is_bot(username):
-            continue
-        user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
-        if _keyword_match(_content_text(item), keyword_list):
-            keyword_matched_users.add(username)
+    if _count_qualifying() < requested_n:
+        for page in arctic_api.get_subreddit_comments_stream(
+            _PRIMARY_SUBREDDIT,
+            fields=comment_fields,
+            limit_per_request=100,
+            max_results=MAX_SUBREDDIT_SCAN_POSTS,
+        ):
+            scanned_comments += len(page)
+            for item in page:
+                username = item.get("author")
+                if _is_bot(username):
+                    continue
+                user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+                if _keyword_match(_content_text(item), keyword_list):
+                    keyword_matched_users.add(username)
 
-    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
+            currently_found = _count_qualifying()
+            if progress_callback is not None:
+                progress_callback(scanned_posts + scanned_comments, currently_found)
+            if currently_found >= requested_n:
+                break
 
-    if progress_callback is not None:
-        final_users = sum(
-            1 for u, c in user_activity_counts.items()
-            if u in keyword_matched_users or c == 1
-        )
-        progress_callback(len(posts) + len(comments), final_users)
+    cap_hit = scanned_posts >= MAX_SUBREDDIT_SCAN_POSTS or scanned_comments >= MAX_SUBREDDIT_SCAN_POSTS
 
     users: list[dict] = []
     for username, activity_count in user_activity_counts.items():
@@ -193,40 +183,47 @@ def identify_secondary_control(subreddit, group_key, target_n=None, progress_cal
 
     fields = ["id", "author", "created_utc"]
     candidate_usernames: set[str] = set()
+    scanned_posts = 0
+    scanned_comments = 0
 
-    posts = _call_arctic_api(
-        arctic_api.get_subreddit_posts,
-        subreddit=subreddit,
+    for page in arctic_api.get_subreddit_posts_stream(
+        subreddit,
         fields=fields,
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
-    )
-    for item in posts:
-        username = item.get("author")
-        if _is_bot(username):
-            continue
-        candidate_usernames.add(username)
+    ):
+        scanned_posts += len(page)
+        for item in page:
+            username = item.get("author")
+            if _is_bot(username):
+                continue
+            candidate_usernames.add(username)
 
-    if progress_callback is not None:
-        progress_callback(len(posts), len(candidate_usernames))
+        if progress_callback is not None:
+            progress_callback(scanned_posts, len(candidate_usernames))
+        if len(candidate_usernames) >= requested_n:
+            break
 
-    comments = _call_arctic_api(
-        arctic_api.get_subreddit_comments,
-        subreddit=subreddit,
-        fields=fields,
-        limit_per_request=100,
-        max_results=MAX_SUBREDDIT_SCAN_POSTS,
-    )
-    for item in comments:
-        username = item.get("author")
-        if _is_bot(username):
-            continue
-        candidate_usernames.add(username)
+    if len(candidate_usernames) < requested_n:
+        for page in arctic_api.get_subreddit_comments_stream(
+            subreddit,
+            fields=fields,
+            limit_per_request=100,
+            max_results=MAX_SUBREDDIT_SCAN_POSTS,
+        ):
+            scanned_comments += len(page)
+            for item in page:
+                username = item.get("author")
+                if _is_bot(username):
+                    continue
+                candidate_usernames.add(username)
 
-    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
+            if progress_callback is not None:
+                progress_callback(scanned_posts + scanned_comments, len(candidate_usernames))
+            if len(candidate_usernames) >= requested_n:
+                break
 
-    if progress_callback is not None:
-        progress_callback(len(posts) + len(comments), len(candidate_usernames))
+    cap_hit = scanned_posts >= MAX_SUBREDDIT_SCAN_POSTS or scanned_comments >= MAX_SUBREDDIT_SCAN_POSTS
 
     deduplicated_usernames = sorted(candidate_usernames, key=str.lower)
     sample_size = min(requested_n, len(deduplicated_usernames))

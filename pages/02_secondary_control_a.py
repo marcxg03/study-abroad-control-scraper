@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 
@@ -46,18 +45,15 @@ def initialize_session_state() -> None:
         "scrape_thread": None,
         "export_summary": None,
         "cap_hit": False,
-        "identification_progress": {
-            "posts_scanned": 0,
-            "users_found": 0,
-            "status": "idle",
-            "result": None,
-            "error": None,
-        },
+        "scan_summary": None,
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if "identification_progress" not in st.session_state:
+        st.session_state["identification_progress"] = {"status": "idle"}
 
 
 def reset_workflow_state() -> None:
@@ -76,13 +72,8 @@ def reset_workflow_state() -> None:
     st.session_state.scrape_thread = None
     st.session_state.export_summary = None
     st.session_state["cap_hit"] = False
-    st.session_state["identification_progress"] = {
-        "posts_scanned": 0,
-        "users_found": 0,
-        "status": "idle",
-        "result": None,
-        "error": None,
-    }
+    st.session_state["scan_summary"] = None
+    st.session_state["identification_progress"] = {"status": "idle"}
 
 
 def current_group_users() -> list[dict]:
@@ -134,6 +125,13 @@ def render_results_table(users: list[dict]) -> None:
     if not users:
         st.info("No users identified yet. Run identification from the configuration section above.")
         return
+
+    scan_summary = st.session_state.get("scan_summary")
+    if scan_summary:
+        st.caption(
+            f"Scanned {scan_summary['posts_scanned']:,} posts from "
+            f"r/{GROUP_CONFIG['subreddit']} · {scan_summary['users_found']} users matched criteria"
+        )
 
     dataframe = pd.DataFrame(users)
     st.dataframe(dataframe, use_container_width=True, hide_index=True)
@@ -278,59 +276,50 @@ def main() -> None:
         step=1,
     )
 
-    id_progress = st.session_state.get("identification_progress", {})
-    id_status = id_progress.get("status", "idle")
+    id_status = st.session_state.get("identification_progress", {}).get("status", "idle")
 
-    if id_status == "done" and id_progress.get("result") is not None:
-        users_result, cap_hit = id_progress["result"]
-        st.session_state.identified_users = users_result
-        st.session_state["cap_hit"] = cap_hit
-        id_progress["result"] = None
+    if st.button("Identify Users", type="primary", use_container_width=True):
+        reset_workflow_state()
+        subreddit = GROUP_CONFIG["subreddit"]
 
-    if id_status in ("idle", "done", "error"):
-        if id_status == "error":
-            st.error(id_progress.get("error") or "The app could not identify Secondary Control A users right now. Please try again.")
-        if st.button("Identify Users", type="primary", use_container_width=True):
-            reset_workflow_state()
-            id_prog = {
-                "posts_scanned": 0,
-                "users_found": 0,
-                "status": "running",
-                "result": None,
-                "error": None,
-            }
-            st.session_state["identification_progress"] = id_prog
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        scan_stats = {"posts_scanned": 0, "users_found": 0}
 
-            def _run_identification(prog=id_prog, n=int(sample_size)):
-                def callback(posts_scanned, users_found):
-                    prog["posts_scanned"] = posts_scanned
-                    prog["users_found"] = users_found
-                try:
-                    result = identify_secondary_control(
-                        subreddit=GROUP_CONFIG["subreddit"],
-                        group_key=GROUP_KEY,
-                        target_n=n,
-                        progress_callback=callback,
-                    )
-                    prog["result"] = result
-                    prog["status"] = "done"
-                except Exception as exc:
-                    prog["status"] = "error"
-                    prog["error"] = str(exc)
+        def update_progress(posts_scanned, users_found):
+            scan_stats["posts_scanned"] = posts_scanned
+            scan_stats["users_found"] = users_found
+            progress_bar.progress(min(posts_scanned / MAX_SUBREDDIT_SCAN_POSTS, 1.0))
+            status_text.caption(
+                f"Scanning r/{subreddit} — {posts_scanned:,} posts scanned "
+                f"· {users_found} users found so far"
+            )
 
-            threading.Thread(target=_run_identification, daemon=True).start()
-            st.rerun()
+        with st.spinner("Identifying users..."):
+            try:
+                users, cap_hit = identify_secondary_control(
+                    subreddit=subreddit,
+                    group_key=GROUP_KEY,
+                    target_n=int(sample_size),
+                    progress_callback=update_progress,
+                )
+                st.session_state.identified_users = users
+                st.session_state["cap_hit"] = cap_hit
+                st.session_state["identification_progress"]["status"] = "done"
+                st.session_state["scan_summary"] = {
+                    "posts_scanned": scan_stats["posts_scanned"],
+                    "users_found": scan_stats["users_found"],
+                }
+            except Exception as exc:
+                st.error(f"Identification failed: {exc}")
+                st.session_state["identification_progress"]["status"] = "error"
 
-    elif id_status == "running":
-        posts_scanned = id_progress.get("posts_scanned", 0)
-        users_found = id_progress.get("users_found", 0)
-        st.progress(min(posts_scanned / MAX_SUBREDDIT_SCAN_POSTS, 1.0))
-        st.caption(
-            f"Scanning r/{GROUP_CONFIG['subreddit']} — "
-            f"{posts_scanned:,} posts scanned · {users_found} users found so far"
-        )
-        time.sleep(1)
         st.rerun()
+
+    if id_status != "idle":
+        if st.button("Start Over", use_container_width=True):
+            reset_workflow_state()
+            st.rerun()
 
     users = current_group_users()
     render_results_table(users)

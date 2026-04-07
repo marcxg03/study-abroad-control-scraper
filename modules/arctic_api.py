@@ -158,3 +158,66 @@ def get_user_comments(username, fields=None, limit_per_request=100, max_results=
     """Return paginated comments for a user, up to max_results items."""
     params, normalized_fields = _build_params("author", username, fields, limit_per_request)
     return _paginate("/api/comments/search", params, normalized_fields, max_results)
+
+
+def _paginate_stream(endpoint: str, params: dict, fields: list[str] | None, max_results: int = MAX_RESULTS_PER_CALL):
+    """Generator version of _paginate. Yields one page of results at a time."""
+    total_yielded = 0
+    request_params = dict(params)
+    seen_cursors: set[str] = set()
+
+    while True:
+        payload = _make_request(endpoint, request_params)
+        batch = payload.get("data", [])
+
+        if not isinstance(batch, list) or not batch:
+            break
+
+        page = [_normalize_fields(item, fields) for item in batch if isinstance(item, dict)]
+
+        if max_results is not None:
+            page = page[:max_results - total_yielded]
+
+        if not page:
+            break
+
+        yield page
+        total_yielded += len(page)
+
+        if max_results is not None and total_yielded >= max_results:
+            break
+
+        last_item = next((item for item in reversed(batch) if isinstance(item, dict)), None)
+        if last_item is None:
+            break
+
+        cursor = last_item.get("created_utc")
+        if not cursor or cursor in seen_cursors:
+            break
+
+        seen_cursors.add(cursor)
+        request_params["after"] = cursor
+
+
+def get_subreddit_posts_stream(subreddit, fields=None, limit_per_request=100, max_results=MAX_RESULTS_PER_CALL):
+    """Yield pages of posts for a subreddit, up to max_results items total."""
+    params, normalized_fields = _build_params("subreddit", subreddit, fields, limit_per_request)
+    yield from _paginate_stream("/api/posts/search", params, normalized_fields, max_results)
+
+
+def get_subreddit_comments_stream(subreddit, fields=None, limit_per_request=100, max_results=MAX_RESULTS_PER_CALL):
+    """Yield pages of comments for a subreddit, up to max_results items total."""
+    params, normalized_fields = _build_params("subreddit", subreddit, fields, limit_per_request)
+    yield from _paginate_stream("/api/comments/search", params, normalized_fields, max_results)
+
+
+def get_user_posts_stream(username, fields=None, limit_per_request=100, max_results=MAX_RESULTS_PER_CALL):
+    """Yield pages of posts for a user, up to max_results items total."""
+    params, normalized_fields = _build_params("author", username, fields, limit_per_request)
+    yield from _paginate_stream("/api/posts/search", params, normalized_fields, max_results)
+
+
+def get_user_comments_stream(username, fields=None, limit_per_request=100, max_results=MAX_RESULTS_PER_CALL):
+    """Yield pages of comments for a user, up to max_results items total."""
+    params, normalized_fields = _build_params("author", username, fields, limit_per_request)
+    yield from _paginate_stream("/api/comments/search", params, normalized_fields, max_results)
