@@ -44,6 +44,7 @@ def initialize_session_state() -> None:
         "cancel_flag": [False],
         "scrape_thread": None,
         "export_summary": None,
+        "cap_hit": False,
     }
 
     for key, value in defaults.items():
@@ -66,6 +67,7 @@ def reset_workflow_state() -> None:
     st.session_state.cancel_flag = [False]
     st.session_state.scrape_thread = None
     st.session_state.export_summary = None
+    st.session_state["cap_hit"] = False
 
 
 def current_group_users() -> list[dict]:
@@ -121,6 +123,14 @@ def render_results_table(users: list[dict]) -> None:
     dataframe = pd.DataFrame(users)
     st.dataframe(dataframe, use_container_width=True, hide_index=True)
 
+    if st.session_state.get("cap_hit", False):
+        st.warning(
+            "⚠️ The subreddit scan reached the 50,000 post safety ceiling "
+            "before scanning the full subreddit. Identified users are drawn "
+            "from the most recent 50,000 posts only. The full subreddit "
+            "history was not searched."
+        )
+
 
 def render_progress_section(users: list[dict]) -> None:
     """Show scrape controls, live progress, and failed-user details."""
@@ -166,9 +176,8 @@ def render_progress_section(users: list[dict]) -> None:
 
     status = progress.get("status", "idle")
     if status == "running":
-        current_user = progress.get("current_user") or "Preparing next user"
         st.write(f"Status: running. Completed {completed} of {progress.get('total', 0)} users.")
-        st.caption(f"Current user: {current_user}")
+        st.caption("Scraping in progress — 5 users running concurrently...")
         if st.button("Cancel Scrape", use_container_width=True):
             st.session_state.cancel_flag[0] = True
             st.warning("Cancellation requested. The app will stop after the current user finishes.")
@@ -257,11 +266,13 @@ def main() -> None:
     if st.button("Identify Users", type="primary", use_container_width=True):
         reset_workflow_state()
         try:
-            st.session_state.identified_users = identify_secondary_control(
+            users_result, cap_hit = identify_secondary_control(
                 subreddit=GROUP_CONFIG["subreddit"],
                 group_key=GROUP_KEY,
                 target_n=int(sample_size),
             )
+            st.session_state.identified_users = users_result
+            st.session_state["cap_hit"] = cap_hit
         except Exception:
             st.error("The app could not identify Secondary Control A users right now. Please try again.")
 

@@ -11,7 +11,7 @@ from config import BOT_BLOCKLIST, CANCELLATION_KEYWORDS, DEFAULT_SAMPLE_SIZE, GR
 from modules import arctic_api
 
 
-MAX_IDENTIFICATION_POSTS = getattr(config, "MAX_IDENTIFICATION_POSTS", 5000)
+MAX_SUBREDDIT_SCAN_POSTS = getattr(config, "MAX_SUBREDDIT_SCAN_POSTS", 50000)
 _PRIMARY_GROUP_KEY = "primary_studyAbroad"
 _PRIMARY_SUBREDDIT = GROUPS[_PRIMARY_GROUP_KEY]["subreddit"]
 _SELECTION_PRIORITY = {
@@ -99,7 +99,7 @@ def _call_arctic_api(api_function, *, fields: list[str], limit_per_request: int,
     return list(records[:max_results])
 
 
-def identify_primary_control(keywords=None, target_n=None) -> list[dict]:
+def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], bool]:
     """Identify the primary study abroad control users from posts and comments."""
     keyword_list = keywords or CANCELLATION_KEYWORDS
     requested_n = target_n or DEFAULT_SAMPLE_SIZE
@@ -113,15 +113,17 @@ def identify_primary_control(keywords=None, target_n=None) -> list[dict]:
         subreddit=_PRIMARY_SUBREDDIT,
         fields=post_fields,
         limit_per_request=100,
-        max_results=MAX_IDENTIFICATION_POSTS,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
     comments = _call_arctic_api(
         arctic_api.get_subreddit_comments,
         subreddit=_PRIMARY_SUBREDDIT,
         fields=comment_fields,
         limit_per_request=100,
-        max_results=MAX_IDENTIFICATION_POSTS,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
+
+    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
 
     user_activity_counts: dict[str, int] = {}
     keyword_matched_users: set[str] = set()
@@ -161,10 +163,10 @@ def identify_primary_control(keywords=None, target_n=None) -> list[dict]:
             user["username"].lower(),
         )
     )
-    return deduplicated_users[:requested_n]
+    return deduplicated_users[:requested_n], cap_hit
 
 
-def identify_secondary_control(subreddit, group_key, target_n=None) -> list[dict]:
+def identify_secondary_control(subreddit, group_key, target_n=None) -> tuple[list[dict], bool]:
     """Identify a random sample of non-bot users from a secondary control subreddit."""
     requested_n = target_n or DEFAULT_SAMPLE_SIZE
     identified_at = _utc_timestamp()
@@ -175,15 +177,17 @@ def identify_secondary_control(subreddit, group_key, target_n=None) -> list[dict
         subreddit=subreddit,
         fields=fields,
         limit_per_request=100,
-        max_results=MAX_IDENTIFICATION_POSTS,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
     comments = _call_arctic_api(
         arctic_api.get_subreddit_comments,
         subreddit=subreddit,
         fields=fields,
         limit_per_request=100,
-        max_results=MAX_IDENTIFICATION_POSTS,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
+
+    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
 
     candidate_usernames = []
     for item in posts + comments:
@@ -207,4 +211,4 @@ def identify_secondary_control(subreddit, group_key, target_n=None) -> list[dict
         for username in sampled_usernames
     ]
 
-    return _deduplicate_users(users)
+    return _deduplicate_users(users), cap_hit

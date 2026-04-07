@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 from datetime import datetime, timezone
 
+import config
 from modules import arctic_api
+
+MAX_CONCURRENT_USERS = getattr(config, "MAX_CONCURRENT_USERS", 5)
 
 
 def _to_iso_utc(created_utc) -> str | None:
@@ -89,7 +93,7 @@ def _scrape_single_user(user: dict) -> list[dict]:
 
 
 def scrape_users(users, progress, cancel_flag) -> list[dict]:
-    """Synchronously scrape full Reddit histories for a list of identified users."""
+    """Scrape full Reddit histories for a list of identified users, up to MAX_CONCURRENT_USERS at a time."""
     progress["total"] = len(users)
     progress["completed"] = progress.get("completed", 0)
     progress["failed_users"] = progress.get("failed_users", [])
@@ -98,23 +102,43 @@ def scrape_users(users, progress, cancel_flag) -> list[dict]:
     progress["current_user"] = None
 
     scraped_records: list[dict] = []
+    lock = threading.Lock()
 
-    for user in users:
+    def _scrape_and_track(user: dict) -> list[dict]:
         username = user.get("username")
-        progress["current_user"] = username
-
+        with lock:
+            progress["current_user"] = username
         try:
-            scraped_records.extend(_scrape_single_user(user))
+            return _scrape_single_user(user)
         except Exception:
-            progress["failed_users"].append(username)
-        finally:
-            progress["completed"] += 1
-            progress["results"] = scraped_records
-            progress["current_user"] = None
+            with lock:
+                progress["failed_users"].append(username)
+            return []
 
-        if cancel_flag[0]:
-            progress["status"] = "cancelled"
-            return scraped_records
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_USERS)
+    try:
+        futures: dict[concurrent.futures.Future, dict] = {}
+        for user in users:
+            if cancel_flag[0]:
+                break
+            futures[executor.submit(_scrape_and_track, user)] = user
+
+        for future in concurrent.futures.as_completed(futures):
+            records = future.result()
+            with lock:
+                scraped_records.extend(records)
+                progress["completed"] += 1
+                progress["results"] = list(scraped_records)
+
+            if cancel_flag[0]:
+                progress["status"] = "cancelled"
+                return scraped_records
+    finally:
+        executor.shutdown(wait=False)
+
+    if cancel_flag[0]:
+        progress["status"] = "cancelled"
+        return scraped_records
 
     progress["status"] = "done"
     return scraped_records
