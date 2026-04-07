@@ -99,7 +99,7 @@ def identify_primary_control(keywords=None, target_n=None, progress_callback=Non
     def _count_qualifying() -> int:
         return sum(
             1 for u, c in user_activity_counts.items()
-            if u in keyword_matched_users or c == 1
+            if u in keyword_matched_users and c == 1
         )
 
     for page in arctic_api.get_subreddit_posts_stream(
@@ -149,22 +149,16 @@ def identify_primary_control(keywords=None, target_n=None, progress_callback=Non
 
     users: list[dict] = []
     for username, activity_count in user_activity_counts.items():
-        if username in keyword_matched_users:
-            selection_reason = "keyword_match"
-        elif activity_count == 1:
-            selection_reason = "one_time_poster"
-        else:
-            continue
-
-        users.append(
-            {
-                "username": username,
-                "source_subreddit": _PRIMARY_SUBREDDIT,
-                "control_group": _PRIMARY_GROUP_KEY,
-                "selection_reason": selection_reason,
-                "identified_at": identified_at,
-            }
-        )
+        if username in keyword_matched_users and activity_count == 1:
+            users.append(
+                {
+                    "username": username,
+                    "source_subreddit": _PRIMARY_SUBREDDIT,
+                    "control_group": _PRIMARY_GROUP_KEY,
+                    "selection_reason": "keyword_match",
+                    "identified_at": identified_at,
+                }
+            )
 
     deduplicated_users = _deduplicate_users(users)
     deduplicated_users.sort(
