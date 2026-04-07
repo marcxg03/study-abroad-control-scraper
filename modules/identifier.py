@@ -99,7 +99,7 @@ def _call_arctic_api(api_function, *, fields: list[str], limit_per_request: int,
     return list(records[:max_results])
 
 
-def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], bool]:
+def identify_primary_control(keywords=None, target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
     """Identify the primary study abroad control users from posts and comments."""
     keyword_list = keywords or CANCELLATION_KEYWORDS
     requested_n = target_n or DEFAULT_SAMPLE_SIZE
@@ -108,6 +108,9 @@ def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], 
     post_fields = ["id", "author", "title", "selftext", "created_utc"]
     comment_fields = ["id", "author", "body", "created_utc"]
 
+    user_activity_counts: dict[str, int] = {}
+    keyword_matched_users: set[str] = set()
+
     posts = _call_arctic_api(
         arctic_api.get_subreddit_posts,
         subreddit=_PRIMARY_SUBREDDIT,
@@ -115,6 +118,21 @@ def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], 
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
+    for item in posts:
+        username = item.get("author")
+        if _is_bot(username):
+            continue
+        user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+        if _keyword_match(_content_text(item), keyword_list):
+            keyword_matched_users.add(username)
+
+    if progress_callback is not None:
+        interim_users = sum(
+            1 for u, c in user_activity_counts.items()
+            if u in keyword_matched_users or c == 1
+        )
+        progress_callback(len(posts), interim_users)
+
     comments = _call_arctic_api(
         arctic_api.get_subreddit_comments,
         subreddit=_PRIMARY_SUBREDDIT,
@@ -122,20 +140,22 @@ def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], 
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
-
-    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
-
-    user_activity_counts: dict[str, int] = {}
-    keyword_matched_users: set[str] = set()
-
-    for item in posts + comments:
+    for item in comments:
         username = item.get("author")
         if _is_bot(username):
             continue
-
         user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
         if _keyword_match(_content_text(item), keyword_list):
             keyword_matched_users.add(username)
+
+    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
+
+    if progress_callback is not None:
+        final_users = sum(
+            1 for u, c in user_activity_counts.items()
+            if u in keyword_matched_users or c == 1
+        )
+        progress_callback(len(posts) + len(comments), final_users)
 
     users: list[dict] = []
     for username, activity_count in user_activity_counts.items():
@@ -166,12 +186,14 @@ def identify_primary_control(keywords=None, target_n=None) -> tuple[list[dict], 
     return deduplicated_users[:requested_n], cap_hit
 
 
-def identify_secondary_control(subreddit, group_key, target_n=None) -> tuple[list[dict], bool]:
+def identify_secondary_control(subreddit, group_key, target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
     """Identify a random sample of non-bot users from a secondary control subreddit."""
     requested_n = target_n or DEFAULT_SAMPLE_SIZE
     identified_at = _utc_timestamp()
 
     fields = ["id", "author", "created_utc"]
+    candidate_usernames: set[str] = set()
+
     posts = _call_arctic_api(
         arctic_api.get_subreddit_posts,
         subreddit=subreddit,
@@ -179,6 +201,15 @@ def identify_secondary_control(subreddit, group_key, target_n=None) -> tuple[lis
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
+    for item in posts:
+        username = item.get("author")
+        if _is_bot(username):
+            continue
+        candidate_usernames.add(username)
+
+    if progress_callback is not None:
+        progress_callback(len(posts), len(candidate_usernames))
+
     comments = _call_arctic_api(
         arctic_api.get_subreddit_comments,
         subreddit=subreddit,
@@ -186,17 +217,18 @@ def identify_secondary_control(subreddit, group_key, target_n=None) -> tuple[lis
         limit_per_request=100,
         max_results=MAX_SUBREDDIT_SCAN_POSTS,
     )
-
-    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
-
-    candidate_usernames = []
-    for item in posts + comments:
+    for item in comments:
         username = item.get("author")
         if _is_bot(username):
             continue
-        candidate_usernames.append(username)
+        candidate_usernames.add(username)
 
-    deduplicated_usernames = sorted(set(candidate_usernames), key=str.lower)
+    cap_hit = len(posts) >= MAX_SUBREDDIT_SCAN_POSTS or len(comments) >= MAX_SUBREDDIT_SCAN_POSTS
+
+    if progress_callback is not None:
+        progress_callback(len(posts) + len(comments), len(candidate_usernames))
+
+    deduplicated_usernames = sorted(candidate_usernames, key=str.lower)
     sample_size = min(requested_n, len(deduplicated_usernames))
     sampled_usernames = random.sample(deduplicated_usernames, sample_size) if sample_size else []
 
