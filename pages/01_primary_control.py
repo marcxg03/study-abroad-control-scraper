@@ -11,7 +11,7 @@ import streamlit as st
 from config import CANCELLATION_KEYWORDS, DEFAULT_SAMPLE_SIZE, GROUPS, MAX_SUBREDDIT_SCAN_POSTS
 from modules.exporter import write_run_log
 from modules.exporter import export_to_csv
-from modules.identifier import identify_primary_control
+from modules.identifier import identify_one_time_posters, identify_keyword_matches, identify_keyword_and_one_time
 from modules.scraper import start_scrape_thread
 
 
@@ -20,6 +20,30 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 LOGS_DIR = PROJECT_ROOT / "logs"
 GROUP_KEY = "primary_studyAbroad"
 GROUP_CONFIG = GROUPS[GROUP_KEY]
+
+BUCKETS = [
+    {
+        "key": "one_time_poster",
+        "label": "One-Time Posters",
+        "description": "Users who posted exactly once in r/studyAbroad (no keyword requirement).",
+        "needs_keywords": False,
+        "fn": identify_one_time_posters,
+    },
+    {
+        "key": "keyword_match",
+        "label": "Keyword Matches",
+        "description": "Users who mentioned a cancellation keyword in any post or comment.",
+        "needs_keywords": True,
+        "fn": identify_keyword_matches,
+    },
+    {
+        "key": "keyword_and_one_time_poster",
+        "label": "Keyword + One-Time Posters",
+        "description": "Users who posted exactly once AND mentioned a cancellation keyword.",
+        "needs_keywords": True,
+        "fn": identify_keyword_and_one_time,
+    },
+]
 
 
 def ensure_runtime_directories() -> None:
@@ -46,6 +70,7 @@ def initialize_session_state() -> None:
         "export_summary": None,
         "cap_hit": False,
         "scan_summary": None,
+        "bucket_summaries": {},
     }
 
     for key, value in defaults.items():
@@ -73,6 +98,7 @@ def reset_workflow_state() -> None:
     st.session_state.export_summary = None
     st.session_state["cap_hit"] = False
     st.session_state["scan_summary"] = None
+    st.session_state["bucket_summaries"] = {}
     st.session_state["identification_progress"] = {"status": "idle"}
 
 
@@ -112,33 +138,38 @@ def sync_finished_scrape() -> None:
 
 
 def render_results_table(users: list[dict]) -> None:
-    """Show identified users in a compact table."""
+    """Show identified users in a compact table with per-bucket summaries."""
     st.subheader("Results")
     with st.expander("ℹ️ What am I looking at?"):
         st.write(
-            "This table shows the users identified for this control group. Each row "
-            "is one user. 'selection_reason' tells you why they were included — "
-            "either keyword_match, one_time_poster, or random_sample. Review the "
-            "list before proceeding. When ready, click Start Scraping to collect "
+            "This table shows all users identified across the selected buckets. "
+            "Each row is one user. 'selection_reason' tells you which bucket they came from: "
+            "'one_time_poster' (posted exactly once), 'keyword_match' (mentioned a keyword), "
+            "or 'keyword_and_one_time_poster' (both). "
+            "Review the list before proceeding. When ready, click Start Scraping to collect "
             "their full Reddit post history."
         )
     if not users:
         st.info("No users identified yet. Run identification from the configuration section above.")
         return
 
-    scan_summary = st.session_state.get("scan_summary")
-    if scan_summary:
-        st.caption(
-            f"Scanned {scan_summary['posts_scanned']:,} posts from "
-            f"r/{GROUP_CONFIG['subreddit']} · {scan_summary['users_found']} users matched criteria"
-        )
+    bucket_summaries = st.session_state.get("bucket_summaries", {})
+    if bucket_summaries:
+        for bucket in BUCKETS:
+            bkey = bucket["key"]
+            summary = bucket_summaries.get(bkey)
+            if summary:
+                st.caption(
+                    f"**{bucket['label']}**: scanned {summary['posts_scanned']:,} posts "
+                    f"· {summary['users_found']} users matched"
+                )
 
     dataframe = pd.DataFrame(users)
     st.dataframe(dataframe, use_container_width=True, hide_index=True)
 
     if st.session_state.get("cap_hit", False):
         st.warning(
-            "⚠️ The subreddit scan reached the 50,000 post safety ceiling "
+            "⚠️ One or more buckets reached the 50,000 post safety ceiling "
             "before scanning the full subreddit. Identified users are drawn "
             "from the most recent 50,000 posts only. The full subreddit "
             "history was not searched."
@@ -262,19 +293,37 @@ def main() -> None:
     st.subheader("Configuration")
     with st.expander("ℹ️ What does this step do?"):
         st.write(
-            "This step identifies Reddit users from the target subreddit who match "
-            "the criteria for this control group. For the Primary Control group, "
-            "we look for users who either posted only once or mentioned canceling "
-            "their study abroad plans. For Secondary groups, we randomly sample "
-            "active users. Adjust the sample size and keywords as needed, then "
-            "click Identify Users to begin."
+            "This step identifies Reddit users from r/studyAbroad across up to three independent "
+            "buckets. Select which buckets to run, set a target sample size for each, and optionally "
+            "edit the cancellation keywords used by the keyword-based buckets. "
+            "Click Identify Users to begin scanning."
         )
-    sample_size = st.number_input(
-        "Target sample size",
-        min_value=1,
-        value=DEFAULT_SAMPLE_SIZE,
-        step=1,
-    )
+
+    st.write("**Select buckets to run:**")
+    bucket_enabled = {}
+    for bucket in BUCKETS:
+        bucket_enabled[bucket["key"]] = st.checkbox(
+            bucket["label"],
+            value=True,
+            help=bucket["description"],
+        )
+
+    active_buckets = [b for b in BUCKETS if bucket_enabled[b["key"]]]
+
+    if not active_buckets:
+        st.warning("Select at least one bucket before running identification.")
+
+    st.write("**Sample sizes:**")
+    bucket_sample_sizes = {}
+    for bucket in active_buckets:
+        bucket_sample_sizes[bucket["key"]] = st.number_input(
+            f"Target sample size — {bucket['label']}",
+            min_value=1,
+            value=DEFAULT_SAMPLE_SIZE,
+            step=1,
+            key=f"sample_size_{bucket['key']}",
+        )
+
     keyword_text = st.text_area(
         "Cancellation keywords (one per line)",
         value="\n".join(CANCELLATION_KEYWORDS),
@@ -283,42 +332,68 @@ def main() -> None:
 
     id_status = st.session_state.get("identification_progress", {}).get("status", "idle")
 
-    if st.button("Identify Users", type="primary", use_container_width=True):
+    if st.button("Identify Users", type="primary", use_container_width=True, disabled=not active_buckets):
         reset_workflow_state()
         keywords = [line.strip() for line in keyword_text.splitlines() if line.strip()]
-        subreddit = GROUP_CONFIG["subreddit"]
+        all_users: list[dict] = []
+        any_cap_hit = False
+        bucket_summaries: dict[str, dict] = {}
+        total_buckets = len(active_buckets)
 
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        scan_stats = {"posts_scanned": 0, "users_found": 0}
+        for i, bucket in enumerate(active_buckets):
+            bkey = bucket["key"]
+            blabel = bucket["label"]
+            target_n = int(bucket_sample_sizes[bkey])
 
-        def update_progress(posts_scanned, users_found):
-            scan_stats["posts_scanned"] = posts_scanned
-            scan_stats["users_found"] = users_found
-            progress_bar.progress(min(posts_scanned / MAX_SUBREDDIT_SCAN_POSTS, 1.0))
-            status_text.caption(
-                f"Scanning r/{subreddit} — {posts_scanned:,} posts scanned "
-                f"· {users_found} users found so far"
-            )
+            st.write(f"Running: **{blabel}** ({i + 1} of {total_buckets})...")
 
-        with st.spinner("Identifying users..."):
-            try:
-                users, cap_hit = identify_primary_control(
-                    keywords=keywords,
-                    target_n=int(sample_size),
-                    progress_callback=update_progress,
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            scan_stats = {"posts_scanned": 0, "users_found": 0}
+
+            def update_progress(posts_scanned, users_found, _stats=scan_stats, _bar=progress_bar, _text=status_text, _sub=GROUP_CONFIG["subreddit"]):
+                _stats["posts_scanned"] = posts_scanned
+                _stats["users_found"] = users_found
+                _bar.progress(min(posts_scanned / MAX_SUBREDDIT_SCAN_POSTS, 1.0))
+                _text.caption(
+                    f"Scanning r/{_sub} — {posts_scanned:,} posts scanned "
+                    f"· {users_found} users found so far"
                 )
-                st.session_state.identified_users = users
-                st.session_state["cap_hit"] = cap_hit
-                st.session_state["identification_progress"]["status"] = "done"
-                st.session_state["scan_summary"] = {
-                    "posts_scanned": scan_stats["posts_scanned"],
-                    "users_found": scan_stats["users_found"],
-                }
-            except Exception as exc:
-                st.error(f"Identification failed: {exc}")
-                st.session_state["identification_progress"]["status"] = "error"
 
+            with st.spinner(f"Identifying {blabel}..."):
+                try:
+                    if bucket["needs_keywords"]:
+                        users, cap_hit = bucket["fn"](
+                            keywords=keywords,
+                            target_n=target_n,
+                            progress_callback=update_progress,
+                        )
+                    else:
+                        users, cap_hit = bucket["fn"](
+                            target_n=target_n,
+                            progress_callback=update_progress,
+                        )
+
+                    all_users.extend(users)
+                    if cap_hit:
+                        any_cap_hit = True
+
+                    bucket_summaries[bkey] = {
+                        "posts_scanned": scan_stats["posts_scanned"],
+                        "users_found": len(users),
+                    }
+                    status_text.caption(f"{blabel} complete — {len(users)} users identified.")
+                    progress_bar.progress(1.0)
+
+                except Exception as exc:
+                    st.error(f"{blabel} identification failed: {exc}")
+                    status_text.empty()
+
+        st.session_state.identified_users = all_users
+        st.session_state["cap_hit"] = any_cap_hit
+        st.session_state["bucket_summaries"] = bucket_summaries
+        st.session_state["scan_summary"] = None
+        st.session_state["identification_progress"]["status"] = "done"
         st.rerun()
 
     if id_status != "idle":

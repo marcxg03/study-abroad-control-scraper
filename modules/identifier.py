@@ -235,3 +235,224 @@ def identify_secondary_control(subreddit, group_key, target_n=None, progress_cal
     ]
 
     return _deduplicate_users(users), cap_hit
+
+
+def identify_one_time_posters(target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
+    """Identify r/studyAbroad users who posted exactly once (no keyword requirement)."""
+    requested_n = target_n or DEFAULT_SAMPLE_SIZE
+    identified_at = _utc_timestamp()
+
+    fields = ["id", "author", "created_utc"]
+    user_activity_counts: dict[str, int] = {}
+    scanned_posts = 0
+    scanned_comments = 0
+
+    def _count_qualifying() -> int:
+        return sum(1 for c in user_activity_counts.values() if c == 1)
+
+    for page in arctic_api.get_subreddit_posts_stream(
+        _PRIMARY_SUBREDDIT,
+        fields=fields,
+        limit_per_request=100,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
+    ):
+        scanned_posts += len(page)
+        for item in page:
+            username = item.get("author")
+            if _is_bot(username):
+                continue
+            user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+
+        currently_found = _count_qualifying()
+        if progress_callback is not None:
+            progress_callback(scanned_posts, currently_found)
+        if currently_found >= requested_n:
+            break
+
+    if _count_qualifying() < requested_n:
+        for page in arctic_api.get_subreddit_comments_stream(
+            _PRIMARY_SUBREDDIT,
+            fields=fields,
+            limit_per_request=100,
+            max_results=MAX_SUBREDDIT_SCAN_POSTS,
+        ):
+            scanned_comments += len(page)
+            for item in page:
+                username = item.get("author")
+                if _is_bot(username):
+                    continue
+                user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+
+            currently_found = _count_qualifying()
+            if progress_callback is not None:
+                progress_callback(scanned_posts + scanned_comments, currently_found)
+            if currently_found >= requested_n:
+                break
+
+    cap_hit = scanned_posts >= MAX_SUBREDDIT_SCAN_POSTS or scanned_comments >= MAX_SUBREDDIT_SCAN_POSTS
+
+    users = [
+        {
+            "username": username,
+            "source_subreddit": _PRIMARY_SUBREDDIT,
+            "control_group": _PRIMARY_GROUP_KEY,
+            "selection_reason": "one_time_poster",
+            "identified_at": identified_at,
+        }
+        for username, count in user_activity_counts.items()
+        if count == 1
+    ]
+
+    deduplicated_users = _deduplicate_users(users)
+    deduplicated_users.sort(key=lambda u: u["username"].lower())
+    return deduplicated_users[:requested_n], cap_hit
+
+
+def identify_keyword_matches(keywords=None, target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
+    """Identify r/studyAbroad users who mentioned a cancellation keyword (any post count)."""
+    keyword_list = keywords or CANCELLATION_KEYWORDS
+    requested_n = target_n or DEFAULT_SAMPLE_SIZE
+    identified_at = _utc_timestamp()
+
+    post_fields = ["id", "author", "title", "selftext", "created_utc"]
+    comment_fields = ["id", "author", "body", "created_utc"]
+    keyword_matched_users: set[str] = set()
+    scanned_posts = 0
+    scanned_comments = 0
+
+    for page in arctic_api.get_subreddit_posts_stream(
+        _PRIMARY_SUBREDDIT,
+        fields=post_fields,
+        limit_per_request=100,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
+    ):
+        scanned_posts += len(page)
+        for item in page:
+            username = item.get("author")
+            if _is_bot(username):
+                continue
+            if _keyword_match(_content_text(item), keyword_list):
+                keyword_matched_users.add(username)
+
+        if progress_callback is not None:
+            progress_callback(scanned_posts, len(keyword_matched_users))
+        if len(keyword_matched_users) >= requested_n:
+            break
+
+    if len(keyword_matched_users) < requested_n:
+        for page in arctic_api.get_subreddit_comments_stream(
+            _PRIMARY_SUBREDDIT,
+            fields=comment_fields,
+            limit_per_request=100,
+            max_results=MAX_SUBREDDIT_SCAN_POSTS,
+        ):
+            scanned_comments += len(page)
+            for item in page:
+                username = item.get("author")
+                if _is_bot(username):
+                    continue
+                if _keyword_match(_content_text(item), keyword_list):
+                    keyword_matched_users.add(username)
+
+            if progress_callback is not None:
+                progress_callback(scanned_posts + scanned_comments, len(keyword_matched_users))
+            if len(keyword_matched_users) >= requested_n:
+                break
+
+    cap_hit = scanned_posts >= MAX_SUBREDDIT_SCAN_POSTS or scanned_comments >= MAX_SUBREDDIT_SCAN_POSTS
+
+    users = [
+        {
+            "username": username,
+            "source_subreddit": _PRIMARY_SUBREDDIT,
+            "control_group": _PRIMARY_GROUP_KEY,
+            "selection_reason": "keyword_match",
+            "identified_at": identified_at,
+        }
+        for username in keyword_matched_users
+    ]
+
+    deduplicated_users = _deduplicate_users(users)
+    deduplicated_users.sort(key=lambda u: u["username"].lower())
+    return deduplicated_users[:requested_n], cap_hit
+
+
+def identify_keyword_and_one_time(keywords=None, target_n=None, progress_callback=None) -> tuple[list[dict], bool]:
+    """Identify r/studyAbroad users who posted exactly once AND mentioned a cancellation keyword."""
+    keyword_list = keywords or CANCELLATION_KEYWORDS
+    requested_n = target_n or DEFAULT_SAMPLE_SIZE
+    identified_at = _utc_timestamp()
+
+    post_fields = ["id", "author", "title", "selftext", "created_utc"]
+    comment_fields = ["id", "author", "body", "created_utc"]
+    user_activity_counts: dict[str, int] = {}
+    keyword_matched_users: set[str] = set()
+    scanned_posts = 0
+    scanned_comments = 0
+
+    def _count_qualifying() -> int:
+        return sum(
+            1 for u, c in user_activity_counts.items()
+            if u in keyword_matched_users and c == 1
+        )
+
+    for page in arctic_api.get_subreddit_posts_stream(
+        _PRIMARY_SUBREDDIT,
+        fields=post_fields,
+        limit_per_request=100,
+        max_results=MAX_SUBREDDIT_SCAN_POSTS,
+    ):
+        scanned_posts += len(page)
+        for item in page:
+            username = item.get("author")
+            if _is_bot(username):
+                continue
+            user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+            if _keyword_match(_content_text(item), keyword_list):
+                keyword_matched_users.add(username)
+
+        currently_found = _count_qualifying()
+        if progress_callback is not None:
+            progress_callback(scanned_posts, currently_found)
+        if currently_found >= requested_n:
+            break
+
+    if _count_qualifying() < requested_n:
+        for page in arctic_api.get_subreddit_comments_stream(
+            _PRIMARY_SUBREDDIT,
+            fields=comment_fields,
+            limit_per_request=100,
+            max_results=MAX_SUBREDDIT_SCAN_POSTS,
+        ):
+            scanned_comments += len(page)
+            for item in page:
+                username = item.get("author")
+                if _is_bot(username):
+                    continue
+                user_activity_counts[username] = user_activity_counts.get(username, 0) + 1
+                if _keyword_match(_content_text(item), keyword_list):
+                    keyword_matched_users.add(username)
+
+            currently_found = _count_qualifying()
+            if progress_callback is not None:
+                progress_callback(scanned_posts + scanned_comments, currently_found)
+            if currently_found >= requested_n:
+                break
+
+    cap_hit = scanned_posts >= MAX_SUBREDDIT_SCAN_POSTS or scanned_comments >= MAX_SUBREDDIT_SCAN_POSTS
+
+    users = [
+        {
+            "username": username,
+            "source_subreddit": _PRIMARY_SUBREDDIT,
+            "control_group": _PRIMARY_GROUP_KEY,
+            "selection_reason": "keyword_and_one_time_poster",
+            "identified_at": identified_at,
+        }
+        for username, activity_count in user_activity_counts.items()
+        if username in keyword_matched_users and activity_count == 1
+    ]
+
+    deduplicated_users = _deduplicate_users(users)
+    deduplicated_users.sort(key=lambda u: u["username"].lower())
+    return deduplicated_users[:requested_n], cap_hit
