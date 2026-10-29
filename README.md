@@ -1,6 +1,6 @@
 # Reddit Control Group Scraper
 
-Local Streamlit app for identifying predefined Reddit control groups and preparing later scraping workflows for a psychology research lab.
+A local Streamlit app that identifies predefined Reddit control groups and scrapes them for a psychology research lab.
 
 ## Setup
 
